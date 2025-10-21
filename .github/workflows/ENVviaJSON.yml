@@ -1,0 +1,35 @@
+name: Upsert Environments + Variables (GitHub App)
+
+on: { workflow_dispatch: {} }
+
+jobs:
+  upsert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      - name: Upsert
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y gh jq
+          CFG=.github/env-config.json
+          jq -e '.environments|type=="array"' "$CFG" >/dev/null
+          jq -c '.environments[]' "$CFG" | while read -r ROW; do
+            NAME=$(jq -r '.name' <<<"$ROW"); ENC=$(printf '%s' "$NAME" | jq -sRr @uri)
+            gh api -X PUT "/repos/$REPO/environments/$ENC"
+            jq -r '.variables // {} | to_entries[]? | "\(.key)=\(.value)"' <<<"$ROW" | \
+            while IFS='=' read -r K V; do
+              KEY=$(echo "$K" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9_' '_')
+              if gh api "/repos/$REPO/environments/$ENC/variables/$KEY" >/dev/null 2>&1; then
+                gh api -X PATCH "/repos/$REPO/environments/$ENC/variables/$KEY" -f value="$V"
+              else
+                gh api -X POST  "/repos/$REPO/environments/$ENC/variables" -f name="$KEY" -f value="$V"
+              fi
+            done
+          done

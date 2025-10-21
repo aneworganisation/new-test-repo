@@ -1,0 +1,39 @@
+{
+  "environments": [
+    {
+      "name": "dev",
+      "variables": {
+        "APP_MODE": "development",
+        "LOG_LEVEL": "debug"
+      }
+    },
+    {
+      "name": "tst",
+      "variables": {
+        "APP_MODE": "test",
+        "LOG_LEVEL": "info"
+      }
+    },
+    {
+      "name": "uat",
+      "variables": {
+        "APP_MODE": "uat",
+        "LOG_LEVEL": "info"
+      }
+    },
+    {
+      "name": "stg",
+      "variables": {
+        "APP_MODE": "staging",
+        "LOG_LEVEL": "warn"
+      }
+    },
+    {
+      "name": "prod",
+      "variables": {
+        "APP_MODE": "production",
+        "LOG_LEVEL": "error"
+      }
+    }
+  ]
+}
