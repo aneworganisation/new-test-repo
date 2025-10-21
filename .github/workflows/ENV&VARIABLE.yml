@@ -1,0 +1,63 @@
+name: Upsert Environment + Variable (GitHub App)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "Environment name (e.g., dev, staging, prod; no spaces)"
+        required: true
+      var_name:
+        description: "Environment variable name (A–Z, 0–9, _)"
+        required: true
+      var_value:
+        description: "Environment variable value"
+        required: true
+
+jobs:
+  upsert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App installation token
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Ensure gh CLI is available
+        run: |
+          type -p gh >/dev/null || { sudo apt-get update && sudo apt-get install -y gh; }
+
+      - name: Create/Update Environment
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          ENV: ${{ inputs.env_name }}
+        run: |
+          set -e
+          gh api -X PUT -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/environments/${ENV}"
+          echo "Environment '${ENV}' ready."
+
+      - name: Create/Update Environment Variable
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          ENV: ${{ inputs.env_name }}
+          NAME: ${{ inputs.var_name }}
+          VALUE: ${{ inputs.var_value }}
+        run: |
+          set -e
+          # Idempotent upsert
+          if gh api -H "Accept: application/vnd.github+json" \
+               "/repos/${REPO}/environments/${ENV}/variables/${NAME}" >/dev/null 2>&1; then
+            gh api -X PATCH -H "Accept: application/vnd.github+json" \
+              "/repos/${REPO}/environments/${ENV}/variables/${NAME}" \
+              -f value="${VALUE}"
+          else
+            gh api -X POST -H "Accept: application/vnd.github+json" \
+              "/repos/${REPO}/environments/${ENV}/variables" \
+              -f name="${NAME}" \
+              -f value="${VALUE}"
+          fi
+          echo "Set variable '${NAME}' in environment '${ENV}'."
