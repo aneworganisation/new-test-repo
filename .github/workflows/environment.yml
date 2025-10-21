@@ -1,0 +1,105 @@
+name: Create/Update Environment (via GitHub App)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "Environment name (e.g., staging, prod)"
+        required: true
+      wait_timer:
+        description: "Optional wait timer in minutes (0-43200). Leave blank for none."
+        required: false
+        default: ""
+      protected_branches:
+        description: "Only allow deployments to protected branches? (true/false)"
+        required: false
+        default: "false"
+      custom_branch_policies:
+        description: "Use custom branch policies? (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  # Not strictly required to just create the environment, but commonly useful later.
+  actions: read
+
+jobs:
+  create-environment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Ensure gh + jq installed
+        run: |
+          type -p gh >/dev/null || { sudo apt-get update && sudo apt-get install -y gh jq; }
+
+      - name: Create or update environment
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ENV_NAME_RAW: ${{ inputs.env_name }}
+          WAIT_TIMER: ${{ inputs.wait_timer }}
+          PROTECTED_BRANCHES: ${{ inputs.protected_branches }}
+          CUSTOM_BRANCH_POLICIES: ${{ inputs.custom_branch_policies }}
+        run: |
+          set -euo pipefail
+
+          # URL-encode the environment name for the path segment
+          ENV_NAME_ENC=$(printf '%s' "$ENV_NAME_RAW" | jq -sRr @uri)
+
+          # Build JSON body
+          body='{}'
+
+          # Add wait_timer if user provided a number
+          if [[ -n "${WAIT_TIMER}" ]]; then
+            if ! [[ "${WAIT_TIMER}" =~ ^[0-9]+$ ]]; then
+              echo "::error::wait_timer must be an integer number of minutes."
+              exit 1
+            fi
+            body=$(jq --argjson v "${WAIT_TIMER}" '. + {wait_timer: $v}' <<<"${body}")
+          fi
+
+          # Add deployment_branch_policy
+          # If either option is true, include the object; else omit to allow all branches.
+          if [[ "${PROTECTED_BRANCHES}" == "true" || "${CUSTOM_BRANCH_POLICIES}" == "true" ]]; then
+            body=$(jq --argjson pb $([[ "${PROTECTED_BRANCHES}" == "true" ]] && echo true || echo false) \
+                      --argjson cbp $([[ "${CUSTOM_BRANCH_POLICIES}" == "true" ]] && echo true || echo false) \
+                      '. + {deployment_branch_policy: {protected_branches: $pb, custom_branch_policies: $cbp}}' \
+                      <<< "${body}")
+          fi
+
+          echo "Request body:"
+          echo "${body}" | jq .
+
+          # PUT creates or updates the environment
+          gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/environments/${ENV_NAME_ENC}" \
+            --input - <<<"${body}"
+
+          echo "Environment '${ENV_NAME_RAW}' created/updated successfully."
+
+      # (Optional) Example: add required reviewers later
+      # - name: Add required reviewers (example - team slugs)
+      #   if: ${{ always() && false }}  # flip to true to use
+      #   env:
+      #     GH_TOKEN: ${{ steps.app_token.outputs.token }}
+      #     REPO: ${{ github.repository }}
+      #     ENV_NAME_RAW: ${{ inputs.env_name }}
+      #   run: |
+      #     set -euo pipefail
+      #     ENV_NAME_ENC=$(printf '%s' "$ENV_NAME_RAW" | jq -sRr @uri)
+      #     # Replace with actual team slugs or user IDs per API docs
+      #     body='{"reviewers":[{"type":"Team","id":1234567},{"type":"User","id":9876543}]}'
+      #     gh api \
+      #       --method PUT \
+      #       -H "Accept: application/vnd.github+json" \
+      #       "/repos/${REPO}/environments/${ENV_NAME_ENC}/deployment-branch-policies" \
+      #       --input - <<<"${body}"
