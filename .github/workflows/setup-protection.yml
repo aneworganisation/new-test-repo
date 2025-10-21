@@ -1,4 +1,4 @@
-name: Setup Branch Protection & Naming
+name: Setup Branch Protection & Naming Ruleset
 
 on:
   workflow_dispatch:
@@ -16,6 +16,7 @@ jobs:
         env:
           GH_TOKEN: ${{ env.ADMIN_TOKEN }}
         run: |
+          set -e
           test -n "$GH_TOKEN" || { echo "❌ Missing REPO_ADMIN_TOKEN"; exit 1; }
           gh api /user >/dev/null || { echo "❌ PAT invalid or expired"; exit 1; }
           gh api "/repos/$OWNER/$REPO" >/dev/null || {
@@ -29,6 +30,7 @@ jobs:
         env:
           GH_TOKEN: ${{ env.ADMIN_TOKEN }}
         run: |
+          set -e
           DEF=$(gh api "/repos/$OWNER/$REPO" --jq .default_branch)
           echo "default_branch=$DEF" >> "$GITHUB_OUTPUT"
           echo "ℹ️ Default branch is: $DEF"
@@ -37,8 +39,9 @@ jobs:
         env:
           GH_TOKEN: ${{ env.ADMIN_TOKEN }}
         run: |
+          set -e
           DEF="${{ steps.def.outputs.default_branch }}"
-          cat > body.json <<'JSON'
+          cat <<'JSON' > body.json
           {
             "required_status_checks": {
               "strict": true,
@@ -53,15 +56,10 @@ jobs:
             "restrictions": null,
             "allow_force_pushes": false,
             "allow_deletions": false,
-            "required_linear_history": false,
-            "block_creations": false,
-            "required_conversation_resolution": true,
-            "lock_branch": false,
-            "allow_fork_syncing": false
+            "required_conversation_resolution": true
           }
           JSON
-          gh api \
-            --method PUT \
+          gh api --method PUT \
             -H "Accept: application/vnd.github+json" \
             "/repos/$OWNER/$REPO/branches/$DEF/protection" \
             --input body.json
@@ -75,46 +73,43 @@ jobs:
             "/repos/$OWNER/$REPO/branches/$DEF/protection/required_signatures" \
             || echo "ℹ️ Signed commits may be restricted — skipped."
 
-      - name: Protect all existing release/* branches
+      - name: Apply branch naming restriction (Ruleset)
         env:
           GH_TOKEN: ${{ env.ADMIN_TOKEN }}
         run: |
-          mapfile -t RELEASE_BRANCHES < <(gh api "/repos/$OWNER/$REPO/branches?per_page=100" --jq '.[].name | select(test("^release/"))')
-          if [ ${#RELEASE_BRANCHES[@]} -eq 0 ]; then
-            echo "ℹ️ No release/* branches found — skipping."
-            exit 0
-          fi
+          set -e
+          cat <<'JSON' > ruleset.json
+          {
+            "name": "Branch naming policy",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "include": ["*"],
+                "exclude": ["main", "release/*"]
+              }
+            },
+            "rules": [
+              {
+                "type": "branch_name_pattern",
+                "parameters": {
+                  "name": "Allowed branch names",
+                  "negate": false,
+                  "operator": "matches",
+                  "pattern": "^(feat|fix|hotfix|chore|refactor|docs|test|perf|build|ci|revert)/[a-z0-9._-]+$"
+                }
+              }
+            ],
+            "bypass_actors": [],
+            "active": true
+          }
+          JSON
 
-          for BRANCH in "${RELEASE_BRANCHES[@]}"; do
-            echo "🔒 Protecting branch: $BRANCH"
-            cat > body.json <<'JSON'
-            {
-              "required_status_checks": {
-                "strict": true,
-                "contexts": ["build","unit-tests","lint","sast","coverage"]
-              },
-              "enforce_admins": true,
-              "required_pull_request_reviews": {
-                "dismiss_stale_reviews": true,
-                "require_code_owner_reviews": true,
-                "required_approving_review_count": 1
-              },
-              "restrictions": null,
-              "allow_force_pushes": false,
-              "allow_deletions": false,
-              "required_linear_history": false,
-              "block_creations": false,
-              "required_conversation_resolution": true,
-              "lock_branch": false,
-              "allow_fork_syncing": false
-            }
-            JSON
-            gh api \
-              --method PUT \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/$OWNER/$REPO/branches/$BRANCH/protection" \
-              --input body.json
-          done
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$OWNER/$REPO/rulesets" \
+            --input ruleset.json \
+            || echo "⚠️ Ruleset creation may fail if not supported for your plan."
 
       - name: Protect tags v*
         env:
@@ -124,12 +119,11 @@ jobs:
             "/repos/$OWNER/$REPO/tags/protection" \
             -f pattern='v*' || echo "ℹ️ Tag protection may already exist."
 
-      - name: Generate branch-name enforcement workflow (local only)
+      - name: Generate local workflow for branch name check (no commit)
         run: |
-          set -euo pipefail
+          set -e
           echo "📁 Working directory: $(pwd)"
           mkdir -p .github/workflows
-
           cat <<'WF' > .github/workflows/branch-name-check.yml
           name: Branch name check
           on:
@@ -146,7 +140,7 @@ jobs:
                 - name: Validate branch name
                   run: |
                     BRANCH="${GITHUB_REF_NAME}"
-                    PATTERN='^(feat|fix|hotfix|chore|refactor|docs|test|perf|build|ci|revert)\/[a-z0-9._-]+$'
+                    PATTERN='^(feat|fix|hotfix|chore|refactor|docs|test|perf|build|ci|revert)/[a-z0-9._-]+$'
                     if [[ "$BRANCH" =~ ^(main|release\/.+)$ ]]; then
                       echo "Skipping enforcement for $BRANCH"
                       exit 0
@@ -154,14 +148,12 @@ jobs:
                     if [[ "$BRANCH" =~ $PATTERN ]]; then
                       echo "✅ Branch name OK: $BRANCH"
                     else
-                      echo "❌ Branch name '$BRANCH' does not match: $PATTERN" >&2
+                      echo "❌ Branch name '$BRANCH' does not match required pattern."
                       echo "Examples:"
                       echo "  feat/add-login"
                       echo "  fix/null-pointer"
                       echo "  hotfix/rollback-v123"
-                      echo "  docs/readme-update"
                       exit 1
                     fi
           WF
-
           echo "✅ Created .github/workflows/branch-name-check.yml (not committed)"
