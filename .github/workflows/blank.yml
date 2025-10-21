@@ -1,0 +1,55 @@
+name: Set repo variable (via GitHub App)
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Variable name (A–Z, 0–9, _ only)
+        required: true
+      value:
+        description: Variable value
+        required: true
+
+permissions:
+  contents: read
+  actions: write   # required to manage Actions variables
+
+jobs:
+  set-variable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Create or update repository variable
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          VAR_NAME: ${{ inputs.name }}
+          VAR_VALUE: ${{ inputs.value }}
+        run: |
+          set -euo pipefail
+          # If the variable exists, PATCH it; otherwise POST to create.
+          if gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${REPO}/actions/variables/${VAR_NAME}" >/dev/null 2>&1; then
+            echo "Variable '${VAR_NAME}' exists; updating…"
+            gh api \
+              -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${REPO}/actions/variables/${VAR_NAME}" \
+              -f value="${VAR_VALUE}"
+          else
+            echo "Variable '${VAR_NAME}' does not exist; creating…"
+            gh api \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${REPO}/actions/variables" \
+              -f name="${VAR_NAME}" \
+              -f value="${VAR_VALUE}"
+          fi
+          echo "Done."
