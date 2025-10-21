@@ -1,0 +1,125 @@
+name: Create/Update Environment + Env Variable (via GitHub App)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "Environment name (e.g., dev, staging, prod)"
+        required: true
+      var_name:
+        description: "Environment variable name (A–Z, 0–9, _ only, uppercase recommended)"
+        required: true
+      var_value:
+        description: "Environment variable value"
+        required: true
+      protected_branches:
+        description: "Only allow deployments from protected branches? (true/false)"
+        required: false
+        default: "false"
+      custom_branch_policies:
+        description: "Use custom branch name patterns? (true/false)"
+        required: false
+        default: "false"
+      wait_timer:
+        description: "Optional wait timer in minutes (0..43200). Leave blank for none."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  upsert-env-and-var:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Ensure gh + jq installed
+        run: |
+          type -p gh >/dev/null || { sudo apt-get update && sudo apt-get install -y gh jq; }
+
+      - name: Create or update Environment
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ENV_NAME_RAW: ${{ inputs.env_name }}
+          PROTECTED_BRANCHES: ${{ inputs.protected_branches }}
+          CUSTOM_BRANCH_POLICIES: ${{ inputs.custom_branch_policies }}
+          WAIT_TIMER: ${{ inputs.wait_timer }}
+        run: |
+          set -euo pipefail
+
+          # URL-encode env name for path usage
+          ENV_NAME_ENC=$(printf '%s' "${ENV_NAME_RAW}" | jq -sRr @uri)
+
+          body='{}'
+          # Optional wait_timer
+          if [[ -n "${WAIT_TIMER}" ]]; then
+            [[ "${WAIT_TIMER}" =~ ^[0-9]+$ ]] || { echo "::error::wait_timer must be integer minutes."; exit 1; }
+            body=$(jq --argjson v "${WAIT_TIMER}" '. + {wait_timer: $v}' <<<"${body}")
+          fi
+
+          # Deployment branch policy (omit if both false)
+          if [[ "${PROTECTED_BRANCHES}" == "true" || "${CUSTOM_BRANCH_POLICIES}" == "true" ]]; then
+            body=$(jq \
+              --argjson pb $([[ "${PROTECTED_BRANCHES}" == "true" ]] && echo true || echo false) \
+              --argjson cbp $([[ "${CUSTOM_BRANCH_POLICIES}" == "true" ]] && echo true || echo false) \
+              '. + {deployment_branch_policy: {protected_branches: $pb, custom_branch_policies: $cbp}}' \
+              <<< "${body}")
+          fi
+
+          echo "Upserting environment '${ENV_NAME_RAW}'..."
+          gh api \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPO}/environments/${ENV_NAME_ENC}" \
+            --input - <<<"${body}"
+
+      - name: Create or update Environment Variable
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ENV_NAME_RAW: ${{ inputs.env_name }}
+          VAR_NAME: ${{ inputs.var_name }}
+          VAR_VALUE: ${{ inputs.var_value }}
+        run: |
+          set -euo pipefail
+
+          # Validate variable name (GitHub recommends uppercase A-Z, 0-9, _)
+          if ! [[ "${VAR_NAME}" =~ ^[A-Z0-9_]+$ ]]; then
+            echo "::error::Invalid variable name '${VAR_NAME}'. Use A–Z, 0–9 and underscore only (uppercase)."
+            exit 1
+          fi
+
+          ENV_NAME_ENC=$(printf '%s' "${ENV_NAME_RAW}" | jq -sRr @uri)
+
+          echo "Checking if env var '${VAR_NAME}' exists in environment '${ENV_NAME_RAW}'..."
+          if gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${REPO}/environments/${ENV_NAME_ENC}/variables/${VAR_NAME}" >/dev/null 2>&1; then
+            echo "Variable exists; updating…"
+            gh api \
+              -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${REPO}/environments/${ENV_NAME_ENC}/variables/${VAR_NAME}" \
+              -f value="${VAR_VALUE}"
+          else
+            echo "Variable not found; creating…"
+            gh api \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${REPO}/environments/${ENV_NAME_ENC}/variables" \
+              -f name="${VAR_NAME}" \
+              -f value="${VAR_VALUE}"
+          fi
+          echo "Done."
